@@ -7,7 +7,32 @@ use std::io;
 use trust_dns_resolver::Resolver;
 use trust_dns_resolver::config::*;
 
+enum NameIdentifier {
+  Domain(String),
+  Tag(String),
+}
+
+enum NameEncoder {
+  Hex,
+  Base32,
+}
+
+fn encode_name(data: &[u8], id: NameIdentifier, encoder: NameEncoder) -> String {
+  let mut s = String::new();
+
+  if let NameIdentifier::Tag(tag) = id {
+    s.push_str(&tag[..]);
+    s.push('.');
+  }
+
+  // TODO: Add periods
+  s.push_str(&hex::encode(data)[..]);
+
+  s
+}
+
 pub fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> Result<Vec<u8>, Box<error::Error>> {
+  println!("Received: {:?}", addresses);
   // Handle no data
   // TODO: Better error handling
   if addresses.len() == 0 {
@@ -39,7 +64,11 @@ pub fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> Result<Vec<u8>, Box<error::Er
     return Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "oops! Result.len() is too short!")));
   }
 
-  return Ok(result);
+  Ok(result)
+}
+
+pub fn decode_aaaa(addresses: Vec<&net::Ipv6Addr>) -> Result<Vec<u8>, Box<error::Error>> {
+  Ok(Vec::new())
 }
 
 fn default_socket_addr() -> net::SocketAddr {
@@ -77,17 +106,11 @@ fn main() {
   loop {
     let mut s = String::new();
     io::stdin().read_line(&mut s).unwrap();
-    let s = hex::encode(s);
-
-    let mut request = String::new();
-    request.push_str("a.");
-    request.push_str(&s[..]);
+    let s = encode_name(s.as_bytes(), NameIdentifier::Tag(String::from("a")), NameEncoder::Hex);
 
   // Lookup the IP addresses associated with a name.
-    //let response: Vec<net::Ipv4Addr> = resolver.ipv4_lookup("a.4142434445464748494a4b4c4d4e4f.5051525354555657.5.8595a5b5c").unwrap().iter().collect();
-    let response = decode_a(resolver.ipv4_lookup(&request[..]).unwrap().iter().collect());
-
-    let response = match response {
+    println!("Sending: {:?}", s);
+    let response = match decode_a(resolver.ipv4_lookup(&s[..]).unwrap().iter().collect()) {
       Ok(s) => Some(String::from_utf8(s)),
       _ => None,
     };
@@ -142,21 +165,29 @@ mod tests {
   #[test]
   fn test_decode_a() {
     // Increasingly longer, but otherwise normal, addresses
-    assert_eq!(decode_a(vec![ ip("0.0.255.0")  ]).unwrap(), vec![]);
-    assert_eq!(decode_a(vec![ ip("0.1.65.255") ]).unwrap(), vec![65]);
-    assert_eq!(decode_a(vec![ ip("0.2.65.66")  ]).unwrap(), vec![65, 66]);
+    assert_eq!(decode_a(vec![ &ip("0.0.255.0")  ]).unwrap(), vec![]);
+    assert_eq!(decode_a(vec![ &ip("0.1.65.255") ]).unwrap(), vec![65]);
+    assert_eq!(decode_a(vec![ &ip("0.2.65.66")  ]).unwrap(), vec![65, 66]);
 
     // Note that we build these backwards
-    assert_eq!(decode_a(vec![ ip("1.67.255.255"), ip("0.3.65.66") ]).unwrap(), vec![65, 66, 67]);
-    assert_eq!(decode_a(vec![ ip("1.67.68.255"),  ip("0.4.65.66") ]).unwrap(), vec![65, 66, 67, 68]);
-    assert_eq!(decode_a(vec![ ip("1.67.68.69"),   ip("0.5.65.66") ]).unwrap(), vec![65, 66, 67, 68, 69]);
+    assert_eq!(decode_a(vec![ &ip("1.67.255.255"), &ip("0.3.65.66") ]).unwrap(), vec![65, 66, 67]);
+    assert_eq!(decode_a(vec![ &ip("1.67.68.255"),  &ip("0.4.65.66") ]).unwrap(), vec![65, 66, 67, 68]);
+    assert_eq!(decode_a(vec![ &ip("1.67.68.69"),   &ip("0.5.65.66") ]).unwrap(), vec![65, 66, 67, 68, 69]);
 
     // And these ones, we build like sandwiches to be extra sure that it's order-agnostic
-    assert_eq!(decode_a(vec![ ip("1.67.68.69"), ip("0.6.65.66"), ip("2.70.255.255") ]).unwrap(), vec![65, 66, 67, 68, 69, 70]);
-    assert_eq!(decode_a(vec![ ip("1.67.68.69"), ip("0.7.65.66"), ip("2.70.71.255")  ]).unwrap(), vec![65, 66, 67, 68, 69, 70, 71]);
-    assert_eq!(decode_a(vec![ ip("1.67.68.69"), ip("0.8.65.66"), ip("2.70.71.72")   ]).unwrap(), vec![65, 66, 67, 68, 69, 70, 71, 72]);
+    assert_eq!(decode_a(vec![ &ip("1.67.68.69"), &ip("0.6.65.66"), &ip("2.70.255.255") ]).unwrap(), vec![65, 66, 67, 68, 69, 70]);
+    assert_eq!(decode_a(vec![ &ip("1.67.68.69"), &ip("0.7.65.66"), &ip("2.70.71.255")  ]).unwrap(), vec![65, 66, 67, 68, 69, 70, 71]);
+    assert_eq!(decode_a(vec![ &ip("1.67.68.69"), &ip("0.8.65.66"), &ip("2.70.71.72")   ]).unwrap(), vec![65, 66, 67, 68, 69, 70, 71, 72]);
 
     // Most of these will be ignored
-    assert_eq!(decode_a(vec![ ip("1.1.1.1"),ip("2.2.2.2"),ip("3.3.3.3"), ip("0.2.65.65"), ip("4.4.4.4"),ip("255.255.255.255") ]).unwrap(), vec![65, 65]);
+    assert_eq!(decode_a(vec![ &ip("1.1.1.1"), &ip("2.2.2.2"), &ip("3.3.3.3"), &ip("0.2.65.65"), &ip("4.4.4.4"), &ip("255.255.255.255") ]).unwrap(), vec![65, 65]);
+  }
+
+  #[test]
+  fn test_encode_name() {
+    assert_eq!(
+      "a.41424344",
+      encode_name("ABCD".as_bytes(), NameIdentifier::Tag(String::from("a")), NameEncoder::Hex)
+    );
   }
 }
