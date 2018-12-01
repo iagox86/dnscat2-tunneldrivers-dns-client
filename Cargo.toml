@@ -1,0 +1,9 @@
+[package]
+name = "dnscat2-tunneldrivers-dns-client"
+version = "0.1.0"
+authors = ["iagox86 <ron-git@skullsecurity.org>"]
+
+[dependencies]
+base32 = "0.4.0"
+hex = "0.3.1"
+trust-dns-resolver = "0.10.0"
