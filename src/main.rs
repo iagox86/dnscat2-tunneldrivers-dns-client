@@ -7,6 +7,7 @@ use std::net;
 use std::error;
 use std::io;
 use std::sync::Arc;
+use std::default::Default;
 use trust_dns_resolver::Resolver;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::lookup::*;
@@ -16,21 +17,32 @@ use trust_dns::rr::rdata::{MX, TXT};
 use trust_dns::proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
 
 
-enum NameIdentifier {
+pub enum NameIdentifier {
   Domain(String),
   Tag(String),
 }
 
-enum NameEncoder {
+pub enum NameEncoder {
   Hex,
   Base32,
 }
 
-struct Settings {
+pub struct Settings {
   name_identifier: NameIdentifier,
   name_encoder:    NameEncoder,
-  segment_length:  usize,
+  segment_length:  u16,
   record_type:     RecordType,
+}
+
+impl Default for Settings {
+  fn default() -> Settings {
+    Settings {
+      name_identifier: NameIdentifier::Tag(String::from("dnscat2")),
+      name_encoder:    NameEncoder::Hex,
+      segment_length:  63,
+      record_type:     RecordType::A,
+    }
+  }
 }
 
 fn encode_name(data: &[u8], settings: &Settings) -> String {
@@ -47,7 +59,7 @@ fn encode_name(data: &[u8], settings: &Settings) -> String {
     NameEncoder::Base32 => base32::encode(base32::Alphabet::RFC4648 { padding: false }, data).to_lowercase(),
   };
 
-  for c in data.as_bytes().chunks(settings.segment_length) {
+  for c in data.as_bytes().chunks(settings.segment_length as usize) {
     segments.push(String::from_utf8_lossy(c).to_string());
   }
 
@@ -165,12 +177,7 @@ fn main() {
 
   let resolver = Resolver::new(resolver_config, resolver_opts).unwrap();
 
-  let settings = Settings {
-    name_identifier: NameIdentifier::Tag(String::from("a")),
-    name_encoder: NameEncoder::Hex,
-    segment_length: 63,
-    record_type: RecordType::TXT,
-  };
+  let settings = Settings { name_identifier: NameIdentifier::Tag(String::from("a")), ..Default::default() };
 
   // TODO: Use system resolver
   //let mut resolver = Resolver::from_system_conf().unwrap();

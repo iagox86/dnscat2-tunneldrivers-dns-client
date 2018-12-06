@@ -2,6 +2,7 @@
 name = "dnscat2-tunneldrivers-dns-client"
 version = "0.1.0"
 authors = ["iagox86 <ron-git@skullsecurity.org>"]
+edition = "2018"
 
 [dependencies]
 base32 = "0.4.0"
