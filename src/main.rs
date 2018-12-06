@@ -1,8 +1,3 @@
-extern crate trust_dns;
-extern crate trust_dns_resolver;
-extern crate hex;
-extern crate base32;
-
 use std::net;
 use std::error;
 use std::io;
@@ -200,19 +195,21 @@ fn main() {
           _ => None,
         }
       },
-     RecordType::TXT => {
-       if let Some(result) = resolver.txt_lookup(&s[..]).unwrap().iter().next() {
-         match result.txt_data().get(0) {
-           Some(d) => match decode_txt(d, &settings) {
-             Ok(s) => Some(String::from_utf8(s)),
-             _ => None,
-           }
-           _ => None,
-         }
-       } else {
-         None
-       }
-     }
+      RecordType::TXT => {
+        if let Some(result) = resolver.txt_lookup(&s[..]).unwrap().iter().next() {
+          match result.txt_data().get(0) {
+            Some(d) => match decode_txt(d, &settings) {
+              Ok(s) => Some(String::from_utf8(s)),
+              _ => None,
+            }
+            _ => None,
+          }
+        } else {
+          None
+        }
+      }
+      // RecordType::MX => {
+      // }
       _ => {
         None
       }
