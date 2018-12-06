@@ -6,16 +6,11 @@ extern crate base32;
 use std::net;
 use std::error;
 use std::io;
-use std::sync::Arc;
 use std::default::Default;
 use trust_dns_resolver::Resolver;
 use trust_dns_resolver::config::*;
-use trust_dns_resolver::lookup::*;
-use trust_dns::rr::{Name, RecordType, RData};
-use trust_dns::rr::rdata;
-use trust_dns::rr::rdata::{MX, TXT};
-use trust_dns::proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-
+use trust_dns::rr::RecordType;
+// use trust_dns::rr::rdata::{MX, TXT};
 
 pub enum NameIdentifier {
   Domain(String),
