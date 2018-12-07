@@ -5,11 +5,12 @@ use std::default::Default;
 use trust_dns_resolver::Resolver;
 use trust_dns_resolver::config::*;
 use trust_dns::rr::RecordType;
+use trust_dns::rr::domain::{Label, Name};
 // use trust_dns::rr::rdata::{MX, TXT};
 
 pub enum NameIdentifier {
-  Domain(String),
-  Tag(String),
+  Domain(Name),
+  Tag(Name),
 }
 
 pub enum NameEncoder {
@@ -27,7 +28,7 @@ pub struct Settings {
 impl Default for Settings {
   fn default() -> Settings {
     Settings {
-      name_identifier: NameIdentifier::Tag(String::from("dnscat2")),
+      name_identifier: NameIdentifier::Tag(Name::from_ascii("dnscat2").unwrap()),
       name_encoder:    NameEncoder::Hex,
       segment_length:  63,
       record_type:     RecordType::A,
@@ -35,12 +36,12 @@ impl Default for Settings {
   }
 }
 
-fn encode_name(data: &[u8], settings: &Settings) -> String {
-  let mut segments: Vec<String> = Vec::new();
+fn encode_name(data: &[u8], settings: &Settings) -> Result<Name, Box<error::Error>> {
+  let mut name = Name::new();
 
   // Add a tag if that's what we're doing
   if let NameIdentifier::Tag(tag) = &settings.name_identifier {
-    segments.push(tag.clone());
+    name = name.append_domain(tag);
   }
 
   // Encode data
@@ -50,15 +51,15 @@ fn encode_name(data: &[u8], settings: &Settings) -> String {
   };
 
   for c in data.as_bytes().chunks(settings.segment_length as usize) {
-    segments.push(String::from_utf8_lossy(c).to_string());
+    name = name.append_label(Label::from_raw_bytes(c).unwrap()).unwrap();
   }
 
   // Add a domain if that's what we're doing
   if let NameIdentifier::Domain(domain) = &settings.name_identifier {
-    segments.push(domain.clone());
+    name = name.append_domain(domain);
   }
 
-  segments.join(".")
+  Ok(name)
 }
 
 pub fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> Result<Vec<u8>, Box<error::Error>> {
@@ -138,6 +139,13 @@ fn decode_txt(data: &[u8], settings: &Settings) -> Result<Vec<u8>, Box<error::Er
   };
 }
 
+fn decode_mx(name: &Name, settings: &Settings) -> Result<Vec<u8>, Box<error::Error>> {
+  println!("Name: {:?}", name);
+  let name = name.to_utf8();
+  println!("Name (utf-8): {:?}", name);
+  return Ok(vec![]);
+}
+
 fn default_socket_addr() -> net::SocketAddr {
   "8.8.8.8:53".parse().unwrap()
 }
@@ -167,7 +175,8 @@ fn main() {
 
   let resolver = Resolver::new(resolver_config, resolver_opts).unwrap();
 
-  let settings = Settings { name_identifier: NameIdentifier::Tag(String::from("a")), ..Default::default() };
+  // TODO: Don't hardcode the record type
+  let settings = Settings { /*record_type: RecordType::MX, */ name_identifier: NameIdentifier::Tag(Name::from_ascii("a").unwrap()), ..Default::default() };
 
   // TODO: Use system resolver
   //let mut resolver = Resolver::from_system_conf().unwrap();
@@ -176,7 +185,7 @@ fn main() {
   loop {
     let mut s = String::new();
     io::stdin().read_line(&mut s).unwrap();
-    let s = encode_name(s.as_bytes(), &settings);
+    let s = encode_name(s.as_bytes(), &settings).unwrap().to_ascii();
 
   // Lookup the IP addresses associated with a name.
     println!("Sending: {:?}", s);
@@ -208,17 +217,24 @@ fn main() {
           None
         }
       }
-      // RecordType::MX => {
-      // }
+      RecordType::MX => {
+        if let Some(result) = resolver.mx_lookup(&s[..]).unwrap().iter().next() {
+          let result = decode_mx(result.exchange(), &settings);
+          println!("{:?}", result);
+          None
+        } else {
+          None
+        }
+      }
       _ => {
         None
       }
     };
     println!("response: {:?}", response);
-  }
+}
 
-//  // There can be many addresses associated with the name,
-//  //  this can return IPv4 and/or IPv6 addresses
+  // There can be many addresses associated with the name,
+  //  this can return IPv4 and/or IPv6 addresses
 //  let address = response.next().expect("no addresses returned!");
 //
 //  if address.is_ipv4() {
@@ -364,72 +380,89 @@ mod tests {
     ]).unwrap(), fromto(65, 108));
   }
 
+  // Lazily get name
+  fn n(name: &str) -> Name {
+    Name::from_ascii(name).unwrap()
+  }
+
   #[test]
   fn test_encode_name_basic() {
     // Basic functionality - making sure it encodes and splits
     let settings = Settings {
-      name_identifier: NameIdentifier::Tag(String::from("a")),
+      name_identifier: NameIdentifier::Tag(n("a")),
       name_encoder: NameEncoder::Hex,
       segment_length: 8,
       record_type: RecordType::A,
     };
-    assert_eq!("a",                            encode_name("".as_bytes(),             &settings));
-    assert_eq!("a.41",                         encode_name("A".as_bytes(),            &settings));
-    assert_eq!("a.4142",                       encode_name("AB".as_bytes(),           &settings));
-    assert_eq!("a.414243",                     encode_name("ABC".as_bytes(),          &settings));
-    assert_eq!("a.41424344",                   encode_name("ABCD".as_bytes(),         &settings));
-    assert_eq!("a.41424344.45",                encode_name("ABCDE".as_bytes(),        &settings));
-    assert_eq!("a.41424344.4546",              encode_name("ABCDEF".as_bytes(),       &settings));
-    assert_eq!("a.41424344.454647",            encode_name("ABCDEFG".as_bytes(),      &settings));
-    assert_eq!("a.41424344.45464748",          encode_name("ABCDEFGH".as_bytes(),     &settings));
-    assert_eq!("a.41424344.45464748.49",       encode_name("ABCDEFGHI".as_bytes(),    &settings));
-    assert_eq!("a.41424344.45464748.494a",     encode_name("ABCDEFGHIJ".as_bytes(),   &settings));
-    assert_eq!("a.41424344.45464748.494a4b",   encode_name("ABCDEFGHIJK".as_bytes(),  &settings));
-    assert_eq!("a.41424344.45464748.494a4b4c", encode_name("ABCDEFGHIJKL".as_bytes(), &settings));
+    assert_eq!(n("a"),                            encode_name("".as_bytes(),             &settings).unwrap());
+    assert_eq!(n("a.41"),                         encode_name("A".as_bytes(),            &settings).unwrap());
+    assert_eq!(n("a.4142"),                       encode_name("AB".as_bytes(),           &settings).unwrap());
+    assert_eq!(n("a.414243"),                     encode_name("ABC".as_bytes(),          &settings).unwrap());
+    assert_eq!(n("a.41424344"),                   encode_name("ABCD".as_bytes(),         &settings).unwrap());
+    assert_eq!(n("a.41424344.45"),                encode_name("ABCDE".as_bytes(),        &settings).unwrap());
+    assert_eq!(n("a.41424344.4546"),              encode_name("ABCDEF".as_bytes(),       &settings).unwrap());
+    assert_eq!(n("a.41424344.454647"),            encode_name("ABCDEFG".as_bytes(),      &settings).unwrap());
+    assert_eq!(n("a.41424344.45464748"),          encode_name("ABCDEFGH".as_bytes(),     &settings).unwrap());
+    assert_eq!(n("a.41424344.45464748.49"),       encode_name("ABCDEFGHI".as_bytes(),    &settings).unwrap());
+    assert_eq!(n("a.41424344.45464748.494a"),     encode_name("ABCDEFGHIJ".as_bytes(),   &settings).unwrap());
+    assert_eq!(n("a.41424344.45464748.494a4b"),   encode_name("ABCDEFGHIJK".as_bytes(),  &settings).unwrap());
+    assert_eq!(n("a.41424344.45464748.494a4b4c"), encode_name("ABCDEFGHIJKL".as_bytes(), &settings).unwrap());
   }
 
   #[test]
   fn test_encode_name_different_tag() {
     let settings = Settings {
-      name_identifier: NameIdentifier::Tag(String::from("abcd")),
+      name_identifier: NameIdentifier::Tag(n("abcd")),
       name_encoder: NameEncoder::Hex,
       segment_length: 8,
       record_type: RecordType::A,
     };
-    assert_eq!("abcd.41424344", encode_name("ABCD".as_bytes(), &settings));
+    assert_eq!(n("abcd.41424344"), encode_name("ABCD".as_bytes(), &settings).unwrap());
   }
+
+  #[test]
+  fn test_encode_name_dotted_tag() {
+    let settings = Settings {
+      name_identifier: NameIdentifier::Tag(n("ab.cd")),
+      name_encoder: NameEncoder::Hex,
+      segment_length: 8,
+      record_type: RecordType::A,
+    };
+    assert_eq!(n("ab.cd.41424344"), encode_name("ABCD".as_bytes(), &settings).unwrap());
+  }
+
 
   #[test]
   fn test_encode_name_different_domain() {
     let settings = Settings {
-      name_identifier: NameIdentifier::Domain(String::from("a")),
+      name_identifier: NameIdentifier::Domain(n("a")),
       name_encoder: NameEncoder::Hex,
       segment_length: 8,
       record_type: RecordType::A,
     };
-    assert_eq!("a",                   encode_name("".as_bytes(),         &settings));
-    assert_eq!("41414141.a",          encode_name("AAAA".as_bytes(),     &settings));
-    assert_eq!("41414141.41414141.a", encode_name("AAAAAAAA".as_bytes(), &settings));
+    assert_eq!(n("a"),                   encode_name("".as_bytes(),         &settings).unwrap());
+    assert_eq!(n("41414141.a"),          encode_name("AAAA".as_bytes(),     &settings).unwrap());
+    assert_eq!(n("41414141.41414141.a"), encode_name("AAAAAAAA".as_bytes(), &settings).unwrap());
   }
 
   #[test]
   fn test_encode_name_base32() {
     let settings = Settings {
-      name_identifier: NameIdentifier::Domain(String::from("a")),
+      name_identifier: NameIdentifier::Domain(n("a")),
       name_encoder: NameEncoder::Base32,
       segment_length: 8,
       record_type: RecordType::A,
     };
-    assert_eq!("a",                encode_name("".as_bytes(),         &settings));
-    assert_eq!("ifaucqi.a",        encode_name("AAAA".as_bytes(),     &settings));
-    assert_eq!("ifaucqkb.ifauc.a", encode_name("AAAAAAAA".as_bytes(), &settings));
+    assert_eq!(n("a"),                encode_name("".as_bytes(),         &settings).unwrap());
+    assert_eq!(n("ifaucqi.a"),        encode_name("AAAA".as_bytes(),     &settings).unwrap());
+    assert_eq!(n("ifaucqkb.ifauc.a"), encode_name("AAAAAAAA".as_bytes(), &settings).unwrap());
 
   }
 
   #[test]
   fn test_decode_txt_hex() {
     let settings = Settings {
-      name_identifier: NameIdentifier::Domain(String::from("a")),
+      name_identifier: NameIdentifier::Domain(Name::from_ascii("a.com").unwrap()),
       name_encoder: NameEncoder::Hex,
       segment_length: 8,
       record_type: RecordType::TXT,
@@ -447,7 +480,7 @@ mod tests {
   #[test]
   fn test_decode_txt_base32() {
     let settings = Settings {
-      name_identifier: NameIdentifier::Domain(String::from("a")),
+      name_identifier: NameIdentifier::Domain(Name::from_ascii("a.com").unwrap()),
       name_encoder: NameEncoder::Base32,
       segment_length: 8,
       record_type: RecordType::TXT,
