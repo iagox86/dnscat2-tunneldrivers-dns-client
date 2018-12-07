@@ -1,12 +1,14 @@
-use std::net;
+mod dns_error;
+
+use std::default::Default;
 use std::error;
 use std::io;
-use std::default::Default;
-use trust_dns_resolver::Resolver;
-use trust_dns_resolver::config::*;
+use std::net;
+use trust_dns::rr::rdata::txt;
 use trust_dns::rr::RecordType;
 use trust_dns::rr::domain::{Label, Name};
-// use trust_dns::rr::rdata::{MX, TXT};
+use trust_dns_resolver::Resolver;
+use trust_dns_resolver::config::*;
 
 pub enum NameIdentifier {
   Domain(Name),
@@ -16,6 +18,19 @@ pub enum NameIdentifier {
 pub enum NameEncoder {
   Hex,
   Base32,
+  // TODO: Implement an encoder/decoder on this
+}
+
+impl NameEncoder {
+  fn decode(&self, s: &str) -> dns_error::Result<Vec<u8>> {
+    match *self {
+      NameEncoder::Hex => Ok(hex::decode(s)?),
+      NameEncoder::Base32 => match base32::decode(base32::Alphabet::RFC4648 { padding: false }, s) {
+        Some(s) => Ok(s),
+        None    => Err(dns_error::Error::encoding_error(String::from("Error decoding from base32"))),
+      }
+    }
+  }
 }
 
 pub struct Settings {
@@ -36,7 +51,7 @@ impl Default for Settings {
   }
 }
 
-fn encode_name(data: &[u8], settings: &Settings) -> Result<Name, Box<error::Error>> {
+fn encode_name(data: &[u8], settings: &Settings) -> dns_error::Result<Name> {
   let mut name = Name::new();
 
   // Add a tag if that's what we're doing
@@ -51,7 +66,8 @@ fn encode_name(data: &[u8], settings: &Settings) -> Result<Name, Box<error::Erro
   };
 
   for c in data.as_bytes().chunks(settings.segment_length as usize) {
-    name = name.append_label(Label::from_raw_bytes(c).unwrap()).unwrap();
+    let label = Label::from_raw_bytes(c)?;
+    name = name.append_label(label)?;
   }
 
   // Add a domain if that's what we're doing
@@ -62,11 +78,10 @@ fn encode_name(data: &[u8], settings: &Settings) -> Result<Name, Box<error::Erro
   Ok(name)
 }
 
-pub fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> Result<Vec<u8>, Box<error::Error>> {
+fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> dns_error::Result<Vec<u8>> {
   // Handle no data
-  // TODO: Better error handling
   if addresses.len() == 0 {
-    return Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "oops! No addresses!")));
+    return Err(dns_error::Error::bad_data(String::from("Zero addresses returned")));
   }
 
   // Convert all the addresses to u8[4]
@@ -80,27 +95,28 @@ pub fn decode_a(addresses: Vec<&net::Ipv4Addr>) -> Result<Vec<u8>, Box<error::Er
 
   // Trim off the first value and merge them all together
   let mut result: Vec<u8> = Vec::new();
-
   for address in addresses {
-    result.extend_from_slice(&address[1..4]);
+    result.extend_from_slice(&address[1..]);
   }
 
+  // Grab the first byte, which is the length
   let len_from_buffer: usize = result.remove(0) as usize;
+
+  // Make sure the length is sane
+  if result.len() < len_from_buffer {
+    return Err(dns_error::Error::bad_data(format!("Invalid length value! First byte was {}, results were {}", len_from_buffer, result.len())));
+  }
+
+  // Truncate to that length
   result.truncate(len_from_buffer);
 
-  // TODO: Better error handling
-  if result.len() < len_from_buffer {
-    return Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "oops! Result.len() is too short!")));
-  }
-
+  // Done!
   Ok(result)
 }
 
-pub fn decode_aaaa(addresses: Vec<&net::Ipv6Addr>) -> Result<Vec<u8>, Box<error::Error>> {
-  // Handle no data
-  // TODO: Better error handling
+fn decode_aaaa(addresses: Vec<&net::Ipv6Addr>) -> dns_error::Result<Vec<u8>> {
   if addresses.len() == 0 {
-    return Err(Box::new(io::Error::new(io::ErrorKind::NotFound, "oops! No addresses!")));
+    return Err(dns_error::Error::bad_data(String::from("Zero addresses returned")));
   }
 
   // Convert all the addresses to u8[4]
@@ -114,37 +130,55 @@ pub fn decode_aaaa(addresses: Vec<&net::Ipv6Addr>) -> Result<Vec<u8>, Box<error:
 
   // Trim off the first value and merge them all together
   let mut result: Vec<u8> = Vec::new();
-
   for address in addresses {
-    result.extend_from_slice(&address[1..16]);
+    result.extend_from_slice(&address[1..]);
   }
 
+  // Grab the first byte, which is the length
   let len_from_buffer: usize = result.remove(0) as usize;
+
+  // Make sure the length is sane
+  if result.len() < len_from_buffer {
+    return Err(dns_error::Error::bad_data(format!("Invalid length value! First byte was {}, results were {}", len_from_buffer, result.len())));
+  }
+
+  // Truncate to that length
   result.truncate(len_from_buffer);
 
-  // TODO: Better error handling
-  if result.len() < len_from_buffer {
-    return Err(Box::new(io::Error::new(io::ErrorKind::NotFound, format!("oops! Result.len() is too short! Expected = {}, got = {}", len_from_buffer, result.len()))));
-  }
-
+  // Done!
   Ok(result)
 }
 
-fn decode_txt(data: &[u8], settings: &Settings) -> Result<Vec<u8>, Box<error::Error>> {
-  println!("Incoming data: {:?}", data);
-  return match settings.name_encoder {
-    NameEncoder::Hex => Ok(hex::decode(data).unwrap()),
-    // TODO: There's gotta be a cleaner way to do this!
-    NameEncoder::Base32 => Ok(base32::decode(base32::Alphabet::RFC4648 { padding: false }, &String::from_utf8_lossy(data).to_string()[..]).unwrap()),
+fn decode_txt(data: Vec<&txt::TXT>, settings: &Settings) -> dns_error::Result<Vec<u8>> {
+  // Make sure we have exactly one record
+  if data.len() != 1 {
+    return Err(dns_error::Error::bad_data(format!("An unexpected number of TXT records ({}) were returned!", data.len())));
+  }
+
+  // Pull out the single record
+  let data = data[0].txt_data();
+
+  // Again, there should be exactly one record
+  if data.len() != 1 {
+    return Err(dns_error::Error::bad_data(format!("An unexpected number of TXT entries ({}) were returned!", data.len())));
+  }
+
+  // Again, pull out the single record
+  let data = match data.get(0) {
+    Some(s) => s,
+    None => return Err(dns_error::Error::bad_data(String::from("No text record was found"))),
   };
+
+  let s = std::str::from_utf8(&data)?;
+  return settings.name_encoder.decode(s);
 }
 
-fn decode_mx(name: &Name, settings: &Settings) -> Result<Vec<u8>, Box<error::Error>> {
+/*fn decode_mx(name: &Name, settings: &Settings) -> Result<Vec<u8>, Box<error::Error>> {
   println!("Name: {:?}", name);
   let name = name.to_utf8();
   println!("Name (utf-8): {:?}", name);
   return Ok(vec![]);
-}
+} */
 
 fn default_socket_addr() -> net::SocketAddr {
   "8.8.8.8:53".parse().unwrap()
@@ -176,7 +210,12 @@ fn main() {
   let resolver = Resolver::new(resolver_config, resolver_opts).unwrap();
 
   // TODO: Don't hardcode the record type
-  let settings = Settings { /*record_type: RecordType::MX, */ name_identifier: NameIdentifier::Tag(Name::from_ascii("a").unwrap()), ..Default::default() };
+  let settings = Settings {
+    record_type: RecordType::TXT,
+    name_identifier: NameIdentifier::Tag(Name::from_ascii("a").unwrap()),
+    //name_encoder: NameEncoder::Base32,
+    ..Default::default()
+  };
 
   // TODO: Use system resolver
   //let mut resolver = Resolver::from_system_conf().unwrap();
@@ -194,29 +233,22 @@ fn main() {
     let response = match settings.record_type {
       RecordType::A => {
         match decode_a(resolver.ipv4_lookup(&s[..]).unwrap().iter().collect()) {
-          Ok(s) => Some(String::from_utf8(s)),
+          Ok(s) => Some(s),
           _ => None,
         }
       },
       RecordType::AAAA => {
         match decode_aaaa(resolver.ipv6_lookup(&s[..]).unwrap().iter().collect()) {
-          Ok(s) => Some(String::from_utf8(s)),
+          Ok(s) => Some(s),
           _ => None,
         }
       },
       RecordType::TXT => {
-        if let Some(result) = resolver.txt_lookup(&s[..]).unwrap().iter().next() {
-          match result.txt_data().get(0) {
-            Some(d) => match decode_txt(d, &settings) {
-              Ok(s) => Some(String::from_utf8(s)),
-              _ => None,
-            }
-            _ => None,
-          }
-        } else {
-          None
+        match decode_txt(resolver.txt_lookup(&s[..]).unwrap().iter().collect(), &settings) {
+          Ok(s) => Some(s),
+          _ => None,
         }
-      }
+      }, /*
       RecordType::MX => {
         if let Some(result) = resolver.mx_lookup(&s[..]).unwrap().iter().next() {
           let result = decode_mx(result.exchange(), &settings);
@@ -225,12 +257,16 @@ fn main() {
         } else {
           None
         }
-      }
+      } */
       _ => {
         None
       }
     };
-    println!("response: {:?}", response);
+
+    match response {
+      Some(r) => println!("response: {:?}", String::from_utf8(r)),
+      _ => println!("no response!"),
+    }
 }
 
   // There can be many addresses associated with the name,
@@ -459,6 +495,10 @@ mod tests {
 
   }
 
+  fn txt_record(s: &str) -> txt::TXT {
+    txt::TXT::new(vec![String::from(s)])
+  }
+
   #[test]
   fn test_decode_txt_hex() {
     let settings = Settings {
@@ -468,13 +508,11 @@ mod tests {
       record_type: RecordType::TXT,
     };
 
-    assert_eq!(decode_txt(b"",         &settings).unwrap(), b"");
-    assert_eq!(decode_txt(b"41",       &settings).unwrap(), b"A");
-    assert_eq!(decode_txt(b"4142",     &settings).unwrap(), b"AB");
-    assert_eq!(decode_txt(b"414243",   &settings).unwrap(), b"ABC");
-    assert_eq!(decode_txt(b"41424344", &settings).unwrap(), b"ABCD");
-
-    // TODO: Test 'bad' hex
+    assert_eq!(decode_txt(vec![&txt_record("")],         &settings).unwrap(), b"");
+    assert_eq!(decode_txt(vec![&txt_record("41")],       &settings).unwrap(), b"A");
+    assert_eq!(decode_txt(vec![&txt_record("4142")],     &settings).unwrap(), b"AB");
+    assert_eq!(decode_txt(vec![&txt_record("414243")],   &settings).unwrap(), b"ABC");
+    assert_eq!(decode_txt(vec![&txt_record("41424344")], &settings).unwrap(), b"ABCD");
   }
 
   #[test]
@@ -486,15 +524,14 @@ mod tests {
       record_type: RecordType::TXT,
     };
 
-    assert_eq!(decode_txt(b"",         &settings).unwrap(), b"");
-    assert_eq!(decode_txt(b"ie",       &settings).unwrap(), b"A");
-    assert_eq!(decode_txt(b"ifba",     &settings).unwrap(), b"AB");
-    assert_eq!(decode_txt(b"ifbeg",    &settings).unwrap(), b"ABC");
-    assert_eq!(decode_txt(b"ifbegra",  &settings).unwrap(), b"ABCD");
+    assert_eq!(decode_txt(vec![&txt_record("")],        &settings).unwrap(), b"");
+    assert_eq!(decode_txt(vec![&txt_record("ie")],      &settings).unwrap(), b"A");
+    assert_eq!(decode_txt(vec![&txt_record("ifba")],    &settings).unwrap(), b"AB");
+    assert_eq!(decode_txt(vec![&txt_record("ifbeg")],   &settings).unwrap(), b"ABC");
+    assert_eq!(decode_txt(vec![&txt_record("ifbegra")], &settings).unwrap(), b"ABCD");
 
     // Make sure it's not case sensitive
-    assert_eq!(decode_txt(b"IFBEGRA",  &settings).unwrap(), b"ABCD");
+    assert_eq!(decode_txt(vec![&txt_record("IFBEGRA")], &settings).unwrap(), b"ABCD");
   }
 
-  // TODO: Handle a bad (too long) tag / domain
 }
